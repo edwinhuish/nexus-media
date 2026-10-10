@@ -1,241 +1,176 @@
-# Nexus Media Docker 部署
+# Nexus Media 一体化 Docker 镜像（edwinhuish/nexus-media）
+
+把 **Nginx + nexus-media（后端）+ nexus-media-web（前端）** 整合进 **一个容器**，对外只暴露一个端口。
+镜像源码、`Dockerfile`、`docker-compose*.yml` 均在本仓库 `main` 分支。
 
 ## 镜像特点
 
-- 基于 Debian（`python:3.14-slim-trixie`）
-- 支持 amd64 / arm64 架构
-- 内嵌 nginx 反代，后端容器统一 **8080** 端口对外（内部服务监听 3000）
-- 非 root 用户运行（nexus:nexus，UID 911，可用 PUID/PGID 覆盖）
-- s6-overlay 进程管理，支持优雅退出
-- 数据库迁移在容器启动时自动执行（`alembic upgrade head`，幂等，无需独立 migration 容器）
+- 单容器：Nginx + 后端 + 前端静态产物，前端不再是独立服务、不再有第二个 Nginx
+- **只暴露一个端口**（容器内 8080）；后端 Granian 绑 `127.0.0.1:3000`，容器外不可达
+- 后端由本仓库源码用 `uv` 构建，前端在构建期从
+  [linyuan0213/nexus-media-web](https://github.com/linyuan0213/nexus-media-web) 源码编译
+- 基于 Debian（`python:3.14-slim-trixie`），支持 amd64 / arm64
+- 非 root 用户运行（`nexus:nexus`，UID 911，可用 PUID/PGID 覆盖）
+- s6-overlay 进程管理，支持优雅退出；数据库迁移在容器启动时自动执行（`alembic upgrade head`，幂等）
 
 ## 端口约定
 
-后端镜像内嵌 nginx：nginx 监听容器内 **8080**，反向代理到内部 nexus-media 服务（3000）。compose 中后端宿主机映射为 `3000:8080`。
+只有 **一个对外端口**：容器内 Nginx 监听 **8080**，反向代理到内部 nexus-media 服务（3000）。
+
+| 服务 | 容器内端口 | 宿主机映射 |
+|---|---|---|
+| 全部服务（经 Nginx） | 8080 | `${WEB_PORT:-8080}:8080` |
+| nexus-media 后端 | 3000（仅绑 `127.0.0.1`） | 不映射 |
+| Redis | 6379 | 不映射（仅内网） |
+| MySQL（可选） | 3306 | `3306:3306` |
+| PostgreSQL（可选） | 5432 | 不映射（仅内网） |
+| nexus-chrome（可选） | 9850 / 6080 | `9850:9850` / `6080:6080` |
+| nexus-verify（可选） | 9300 | `9300:9300` |
 
 ## 快速开始
 
-项目根目录提供 **3 个独立 compose 文件**，按部署场景选一个：
+项目根目录提供 **3 个独立 compose 文件**，按场景选一个（三者互斥，只选一个部署）：
 
 | 文件 | 场景 | 启动 |
 |---|---|---|
-| `docker-compose.yml` | 前后端 + Redis（SQLite，开箱即用） | `docker compose up -d` |
+| `docker-compose.yml` | 一体化 + Redis（SQLite，开箱即用） | `docker compose up -d` |
 | `docker-compose.mysql.yml` | MySQL 完整版（+Redis+OCR+Chrome） | `docker compose -f docker-compose.mysql.yml up -d` |
-| `docker-compose.postgresql.yml` | PostgreSQL 完整版 | `docker compose -f docker-compose.postgresql.yml up -d` |
+| `docker-compose.postgresql.yml` | PostgreSQL 完整版（+Redis+OCR+Chrome） | `docker compose -f docker-compose.postgresql.yml up -d` |
 
-> 三个文件**互斥**（`container_name`/端口/网络名相同），只选一个部署。
-
-> **容器间网络提示**：所有服务运行在自定义网桥 `nexus-media-network` 上，后端通过服务名（`mysql`/`postgresql`/`redis`）互访，前端经网络别名 `backend` 访问后端。若之前部署过，旧网络/旧容器残留会导致容器间互连失败，先 `docker compose down` 并清理残留网络/容器再启动。
-
-### 基础版（SQLite + Redis，开箱即用）
+### 1. 修改配置
 
 ```bash
-docker compose up -d
+cp .env.example .env
 ```
 
-### MySQL 完整版
+**必填项**：
 
 ```bash
-docker compose -f docker-compose.mysql.yml up -d
+VIDEO_DIR=/mnt/media     # 媒体库目录（宿主机路径）
+WEB_PORT=8080            # 唯一对外端口
+PUID=1000                # 填宿主机 `id -u`
+PGID=1000                # 填宿主机 `id -g`
 ```
 
-### PostgreSQL 完整版
+MySQL / PostgreSQL 变体还需设置密码（`DB_PASSWORD`，MySQL 额外 `MYSQL_ROOT_PASSWORD`，Chrome 变体 `VNC_PASSWORD`）。
+
+宿主机侧保证数据目录可写（详见「PUID / PGID」）：
 
 ```bash
-docker compose -f docker-compose.postgresql.yml up -d
+mkdir -p data
+sudo chown -R "$(id -u):$(id -g)" data
 ```
 
-### 修改配置
+### 2. 启动与访问
 
-1. **媒体目录挂载**：修改所选 compose 文件中后端的 `- /mnt/media:/media` 为你的媒体库目录
-2. **密码**：MySQL/PostgreSQL 版的密码在项目根目录 `.env` 中设置（`docker compose` 自动读取），必填项缺失会启动报错提示：
+```bash
+docker compose up -d                                     # 基础版
+docker compose -f docker-compose.mysql.yml up -d         # MySQL 完整版
+docker compose -f docker-compose.postgresql.yml up -d    # PostgreSQL 完整版
+```
 
-   ```bash
-   # .env
-   MYSQL_ROOT_PASSWORD=你的root密码
-   MYSQL_PASSWORD=你的应用密码
-   POSTGRES_PASSWORD=你的PostgreSQL密码   # PostgreSQL 版
-   VNC_PASSWORD=你的Chrome VNC密码         # 完整版
-   ```
+- 前端 Web UI：http://localhost:8080
+- 后端 API：http://localhost:8080/api/
+- 健康检查：http://localhost:8080/health
 
-3. **数据库迁移**：后端启动时自动执行 `alembic upgrade head`，无需手动迁移
+数据库迁移由后端启动时自动执行，无需单独操作。
 
-### 访问
-
-- 前端 Web UI: http://localhost:8080
-- 后端 API: http://localhost:3000
-
-## 单独部署后端
-
-**docker cli**
+## 单独运行
 
 ```bash
 docker run -d \
-  --name nexus-media \
-  --hostname nexus-media \
-  -p 3000:8080 \
-  -v $(pwd)/data:/data \
-  -v /mnt/media:/media \
-  -e PUID=0 \
-  -e PGID=0 \
-  -e UMASK=000 \
-  -e NEXUS_PORT=3000 \
-  -e NEXUS_MEDIA_DATA=/data \
-  linyuan0213/nexus-media:latest
-```
-
-> 容器内 nginx 监听 8080，`-p 3000:8080` 表示宿主机 3000 访问后端。
-
-**docker-compose**
-
-```yaml
-services:
-  nexus-media:
-    image: linyuan0213/nexus-media:latest
-    ports:
-      - 3000:8080
-    volumes:
-      - ./data:/data
-      - /mnt/media:/media
-    environment:
-      - PUID=0
-      - PGID=0
-      - UMASK=000
-      - NEXUS_PORT=3000
-      - NEXUS_MEDIA_DATA=/data
-    restart: always
-    hostname: nexus-media
-    container_name: nexus-media
-```
-
-> 单独部署后端时（无 compose 内 Redis/DB），需配置 `REDIS__HOST` 与 `DATABASE__*` 指向外部 Redis / 数据库。
-
-## 单独部署前端
-
-前端 Docker 镜像内嵌 nginx，通过环境变量指向后端地址，所有 `/api/`、`/ws` 请求由 nginx 转发。
-
-**docker cli**
-
-```bash
-docker run -d \
-  --name nexus-media-web \
+  --name nexus-media --hostname nexus-media \
   -p 8080:8080 \
-  -e BACKEND_HOST=192.168.1.100 \
-  -e BACKEND_PORT=3000 \
-  linyuan0213/nexus-media-web:latest
+  -v "$(pwd)/data:/data" \
+  -v /mnt/media:/media \
+  -e PUID="$(id -u)" -e PGID="$(id -g)" \
+  -e TZ=Asia/Shanghai \
+  -e REDIS__HOST=你的redis地址 \
+  --restart always \
+  edwinhuish/nexus-media:latest
 ```
 
-**docker-compose**
-
-```yaml
-services:
-  nexus-media-web:
-    image: linyuan0213/nexus-media-web:latest
-    ports:
-      - 8080:8080
-    environment:
-      - BACKEND_HOST=nexus-media   # 后端服务地址
-      - BACKEND_PORT=3000          # 后端宿主机映射端口
-    restart: always
-    container_name: nexus-media-web
-```
-
-> `BACKEND_PORT` 填后端**宿主机映射端口**（compose 中后端 `3000:8080`，故填 `3000`）。
-
-## Redis 配置
-
-compose 中 Redis 服务已配置（无密码、使用 `./data/redis_data` 持久化）：
-
-```yaml
-  redis:
-    image: redis:7-alpine
-    container_name: nexus-media-redis
-    volumes:
-      - ./data/redis_data:/data
-    command: redis-server --save "" --appendonly no --dir /data
-```
-
-后端通过 `REDIS__*` 环境变量连接（compose 的 MySQL/PostgreSQL 版已设置 `REDIS__HOST=redis`，用服务名）。使用外部 Redis 时，覆盖这些变量即可：
-
-```yaml
-    environment:
-      - REDIS__HOST=你的redis地址
-      - REDIS__PORT=6379
-      - REDIS__PASSWORD=你的redis密码   # 无密码则省略
-      - REDIS__DB=0
-```
-
-## 数据库配置
-
-- **基础版（SQLite + Redis）** 使用 SQLite，无需配置数据库（数据在 `./data/db/`）
-- **MySQL / PostgreSQL 版** 由 compose 自动配置，后端启动时自动执行 `alembic upgrade head` 迁移（幂等，无需独立 migration 容器）
-- 使用外部数据库时设置 `DATABASE__*` 指向外部实例，后端启动时同样自动迁移
+> 单容器运行不带 Redis / 数据库，需用 `REDIS__*` / `DATABASE__*` 指向外部实例。
 
 ## 环境变量
 
-环境变量优先级：`环境变量 > .env > config.yaml`。除 Docker 镜像专用变量外，其余变量对应 `src/app/core/settings.py` 中的配置节点，使用 `__` 作为嵌套分隔符，例如 `APP__WEB_HOST`、`DATABASE__TYPE`、`REDIS__HOST`。
+优先级：`环境变量 > .env > config.yaml`。嵌套分隔符为 `__`，例如 `APP__WEB_HOST`、`DATABASE__TYPE`、`REDIS__HOST`。
 
-### Docker 镜像专用变量
-
-**后端镜像 (`linyuan0213/nexus-media`)**
+### 镜像专用变量
 
 | 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `PUID` | 0 | 运行用户 UID |
-| `PGID` | 0 | 运行用户 GID |
+|---|---|---|
+| `PUID` / `PGID` | 0 | 容器内 nexus 用户 uid / gid |
 | `UMASK` | 000 | 文件权限掩码 |
-| `NEXUS_PORT` | 3000 | 容器内部 nexus-media 服务端口（内嵌 nginx 每次启动按该值自动渲染 upstream，修改后需重建镜像/容器生效） |
-| `SKIP_MIGRATION` | false | 设为 `true` 跳过启动时数据库迁移（默认自动执行） |
 | `TZ` | Asia/Shanghai | 时区 |
-| `NEXUS_MEDIA_DATA` | /data | 数据目录（config.yaml、数据库、插件数据） |
-| `NEXUS_MEDIA_CONFIG` | /data/config.yaml | 配置文件路径 |
+| `NEXUS_HOST` | 127.0.0.1 | 后端监听地址（默认仅绑回环） |
+| `NEXUS_PORT` | 3000 | 后端监听端口，**同时决定** Granian 端口与 Nginx upstream |
+| `NEXUS_MEDIA_DATA` | /data | 数据目录（配置 / SQLite / 插件） |
+| `NEXUS_MEDIA_CONFIG` | /data/config.yaml | 配置文件路径（可选） |
+| `SKIP_MIGRATION` | false | `true` 时跳过启动时的 `alembic upgrade head` |
 
-**前端镜像 (`linyuan0213/nexus-media-web`)**
-
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `BACKEND_HOST` | `nexus-media` | 后端服务地址（compose 内为服务名，独立部署时设为 IP 或域名） |
-| `BACKEND_PORT` | `3000` | 后端宿主机映射端口（前端 nginx 转发目标） |
-
-### 前后端配置变量（`app` 节点）
+### 构建期变量
 
 | 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `APP__WEB_HOST` | :: | Web 监听地址 |
-| `APP__WEB_PORT` | 3000 | Web 监听端口 |
-| `APP__LOGIN_USER` | admin | 默认登录用户名 |
-| `APP__LOGIN_PASSWORD` | password | 默认登录密码 |
-| `APP__TMDB_DOMAIN` | api.themoviedb.org | TMDB API 域名 |
+|---|---|---|
+| `FRONTEND_REPO` | `https://github.com/linyuan0213/nexus-media-web.git` | 前端源码仓库 |
+| `FRONTEND_REF` | 空（默认分支） | 前端源码分支 / tag；不存在时自动回退默认分支 |
+| `UV_INDEX_URL` | `https://pypi.org/simple` | Python 包索引 |
 
-### 数据库配置变量（`database` 节点）
+> 应用配置变量（`APP__*` / `DATABASE__*` / `REDIS__*` / `LOG__*`）以 `src/app/core/settings.py` 为准。
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `DATABASE__TYPE` | sqlite | 数据库类型：`sqlite` / `mysql` / `postgresql` |
-| `DATABASE__HOST` | localhost | 数据库地址 |
-| `DATABASE__PORT` | 0 | 数据库端口 |
-| `DATABASE__USERNAME` | — | 数据库用户名 |
-| `DATABASE__PASSWORD` | — | 数据库密码 |
-| `DATABASE__DATABASE` | nas_tools | 数据库名称 |
+## 目录说明
 
-### Redis 配置变量（`redis` 节点）
+| 容器路径 | 说明 |
+|---|---|
+| `/data` | 配置文件、数据库、插件数据（必须挂载） |
+| `/usr/share/nginx/html` | 前端静态产物（由 Nginx 直接托管） |
+| `/media` | 媒体库目录（需自行映射） |
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `REDIS__HOST` | 127.0.0.1 | Redis 地址（compose 内为 `nexus-media-redis`） |
-| `REDIS__PORT` | 6379 | Redis 端口 |
-| `REDIS__PASSWORD` | — | Redis 密码 |
-| `REDIS__DB` | 0 | Redis 数据库索引 |
+## PUID / PGID
 
-### 其他常用变量
+**目标：容器内进程以宿主机用户的身份运行，写出的文件属主与宿主机一致。**
 
-| 变量 | 默认值 | 说明 |
-|------|--------|------|
-| `NEXUS_MEDIA_CONFIG` | /data/config.yaml | 配置文件路径（可选，默认自动发现） |
-| `NEXUS_MEDIA_DATA` | /data | 数据目录路径（可选，默认 `./data`） |
-| `LOG__FORMAT` | text | 设为 `json` 输出 ELK 兼容日志 |
+两道 cont-init 接力（s6 按文件名顺序执行）：
 
-## PUID / PGID 说明
+| 脚本 | 做什么 |
+|---|---|
+| `020-fixuser` | `groupmod -o -g $PGID nexus`、`usermod -o -u $PUID nexus`，并 chown `${HOME}`(= `/nexus`) 与 `/config`、nginx 运行目录 |
+| `030-nginx-runtime-perms` | 把 **Web 根目录**（`/usr/share/nginx/html`）与 nginx 的 log / pid / temp 目录重新 chown 给调整后的 nexus |
 
-- 若同时使用 Emby / Jellyfin / Plex / qBittorrent 等 Docker 镜像，建议保持 PUID / PGID 一致
-- 在宿主机上执行 `id -u` 和 `id -g` 获取对应值
+宿主机侧还需保证 `./data` 对 `PUID:PGID` 可写：
+
+```bash
+mkdir -p data data/redis_data
+sudo chown -R "$(id -u):$(id -g)" data
+```
+
+> 媒体目录 `/media` 建议只读挂载（`-v /mnt/media:/media:ro`）；镜像刻意不递归 chown `/data`、`/media`。
+
+## 构建镜像
+
+本地构建（默认取 web 仓库默认分支的前端源码）：
+
+```bash
+docker build -t edwinhuish/nexus-media:latest .
+```
+
+锁定前端版本：
+
+```bash
+docker build --build-arg FRONTEND_REF=v4.24.5 -t edwinhuish/nexus-media:latest .
+```
+
+> 推送 `v*` 形式的 git tag 会触发 `.github/workflows/build.yml` 自动构建并推送镜像
+> （`edwinhuish/nexus-media:latest` + `:<version>`），并把该 tag 作为 `FRONTEND_REF` 传给前端构建。
+
+## 与上游两容器方案的差异
+
+| 维度 | 上游（2 容器） | 本镜像（1 容器） |
+|---|---|---|
+| 容器数 | 2（web + backend） | 1 |
+| Nginx 实例 | 2 | 1 |
+| 对外端口 | 8080(前端) + 3000(后端 API) | 只有 8080 |
+| 前端→后端 | `BACKEND_HOST:PORT` 跨容器 | `127.0.0.1:$NEXUS_PORT`，容器内回环 |
+| 进程管理 | 前端 nginx 裸跑 + 后端 s6 | 统一 s6 托管，`nginx` 依赖 `nexus-media` 就绪后启动 |
+| `NEXUS_PORT` 语义 | 只改 Nginx upstream | 同时作用于应用与 Nginx，语义自洽 |

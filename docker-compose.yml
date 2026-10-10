@@ -1,52 +1,43 @@
-# Nexus Media 基础版：前后端 + Redis，使用 SQLite（无需外部数据库）
-# 启动：docker compose up -d
+# Nexus Media 基础版：一体化镜像（前后端 + Nginx）+ Redis，使用 SQLite（无需外部数据库）
+# 用法：把本文件与 .env 放到部署目录，docker compose up -d
+# 只发布一个端口：${WEB_PORT:-8080} → 容器内 Nginx(8080)，后端 3000 不发布
 services:
-  frontend:
-    image: linyuan0213/nexus-media-web:latest
-    ports:
-      - 8080:8080
+  nexus-media:
+    image: edwinhuish/nexus-media:${IMAGE_TAG:-latest}
+    container_name: nexus-media
+    hostname: nexus-media
     restart: always
-    container_name: nexus-media-web
+
+    # 唯一对外入口
+    ports:
+      - "${WEB_PORT:-8080}:8080"
+
+    volumes:
+      - ./data:/data                  # 配置 / SQLite / 插件数据 / 日志
+      - ${VIDEO_DIR:-/video}:/video   # 媒体库，改成你自己的目录
+
+    environment:
+      PUID: ${PUID:-0}                # 容器内进程身份 = 宿主机用户，保证文件权限一致
+      PGID: ${PGID:-0}
+      UMASK: ${UMASK:-000}
+      TZ: ${TZ:-Asia/Shanghai}
+      NEXUS_MEDIA_DATA: /data
+      REDIS__HOST: ${REDIS_HOST:-redis}
+      REDIS__PORT: ${REDIS_PORT:-6379}
+      REDIS__DB: ${REDIS_DB:-0}
+
+    healthcheck:
+      test: ["CMD-SHELL", "wget -qO- http://127.0.0.1:8080/health || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 60s
+
     networks:
       - nexus-media-network
     depends_on:
-      backend:
-        condition: service_healthy
-        required: false
-
-  # 后端：启动时自动执行 alembic 迁移（镜像内置，无需独立 migration 容器）
-  backend:
-    image: linyuan0213/nexus-media:latest
-    ports:
-      - 3000:8080
-    volumes:
-      - ./data:/data
-      # 替换为你的实际媒体目录，例如：
-      # - /mnt/media:/media
-    restart: always
-    hostname: nexus-media
-    container_name: nexus-media
-    networks:
-      nexus-media-network:
-        aliases:
-          - backend
-    environment:
-      PUID: "0"
-      PGID: "0"
-      UMASK: "000"
-      NEXUS_MEDIA_DATA: /data
-      REDIS__HOST: redis
-      REDIS__PORT: "6379"
-      REDIS__DB: "0"
-    depends_on:
       redis:
         condition: service_started
-    healthcheck:
-      test: "wget -qO- http://localhost:8080/health || exit 1"
-      interval: 30s
-      timeout: 30s
-      retries: 3
-      start_period: 40s
 
   redis:
     image: redis:7-alpine
