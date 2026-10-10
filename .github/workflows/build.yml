@@ -6,6 +6,13 @@ on:
     tags:
       - v*
 
+# ghcr.io 推送需要 packages: write（默认 GITHUB_TOKEN 权限为只读时会被拒绝：
+# denied: installation not allowed to Create organization package）
+# 指定 permissions 后未列出的权限会被置为 none，故需一并声明 contents
+permissions:
+  contents: write
+  packages: write
+
 jobs:
   ci:
     uses: ./.github/workflows/ci.yml
@@ -113,6 +120,8 @@ jobs:
           } > telegram_msg.txt
 
       - name: Send Telegram Notification
+        # fork 中通常未配置 TELEGRAM_* secret，失败不应影响镜像构建结果
+        continue-on-error: true
         uses: appleboy/telegram-action@master
         with:
           to: ${{ secrets.TELEGRAM_CHAT_ID }}
